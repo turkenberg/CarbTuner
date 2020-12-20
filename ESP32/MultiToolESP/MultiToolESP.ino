@@ -1,4 +1,5 @@
 
+  
 
 #include <SPI.h>
 #include <Wire.h>
@@ -9,6 +10,7 @@
 
 #define      LAMBDA_PIN 34
 #define         TPS_PIN 31
+#define         RPM_PIN 12
 #define      BUTTON_PIN 13
 #define    OLED_SDA_PIN 21
 #define    OLED_SCL_PIN 22
@@ -67,6 +69,11 @@ void InitGauge(int min, int max) {
     gauge_active = false;
 }
 
+// RPM GAUGE =======
+long currentRPM;
+bool lastState;
+unsigned long lastPickUp;
+
 // =========== LOGIC ===============
 
 void setup()   {                
@@ -76,10 +83,13 @@ void setup()   {
   BootAnimation();
 
   InitLambdaSmoothing();
+  InitRPM();
 
   InitGauge(afrMin, afrMax);
 
   global_totalMicros = micros();
+
+  
 }
 
 
@@ -117,6 +127,9 @@ void UpdateValues(){
   local_valuesMicros = micros();
   lambda_updateValue();
 
+  UpdateRPM();
+    
+
 // -----------
 if (!SERIALPERFCOUNTERS)
   return;
@@ -142,7 +155,6 @@ void ScreenUpdate(){
   }
 
   drawFPS();
-  
   local_GPUMicros = micros();
   
   switch (state){
@@ -151,12 +163,7 @@ void ScreenUpdate(){
     break;
 
     case 1: // RPM gauge direct display TODO
-    display.clearDisplay();
-    display.setTextColor(INVERSE);
-    display.setCursor(52,20);
-    display.setTextSize(1);
-    display.print("RPM display");
-    display.display();
+    DisplayRPM();
     break;
 
     case 2: // Calibration screen : show min and max TODO
@@ -180,6 +187,7 @@ void ScreenUpdate(){
     default:
     break;
   }
+  
 // -----------
 if (!SERIALPERFCOUNTERS)
   return;
@@ -236,6 +244,41 @@ void drawFPS(){
     display.print(UPS);
 }
 
+// ============= RPM GAUGE ===============
+
+void InitRPM(){
+  pinMode(RPM_PIN, INPUT_PULLUP);
+  lastState = LOW;
+  lastPickUp = micros();
+  currentRPM = 800;
+}
+
+void DisplayRPM(){
+    display.setTextColor(WHITE,BLACK);
+    display.setCursor(6,16);
+    display.setTextSize(2);
+    display.print("             ");
+    display.setCursor(6,16);
+    display.print("RPM: ");
+    display.println(currentRPM);
+    display.display();
+}
+
+void UpdateRPM(){
+  if (digitalRead(RPM_PIN) == HIGH)
+  {
+    if (lastState == LOW) // pickup
+    {
+      lastState = HIGH;
+      currentRPM = 60000000 / (micros() - lastPickUp);
+      lastPickUp = micros();
+    }
+  }
+  else
+  {
+    if (lastState == HIGH) lastState = LOW;
+  }
+}
 
 // ============= AFR GAUGE ===============
 
