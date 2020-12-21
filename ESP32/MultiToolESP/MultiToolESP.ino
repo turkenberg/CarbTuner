@@ -1,12 +1,12 @@
+#include <SPI.h>              // SPI connection (SD & oled screen)
+#include <Wire.h>             // I2C screen connection
+#include <Adafruit_GFX.h>     // GFX
+#include <Adafruit_SH1106.h>  // OLED screen
+#include <ClickButton.h>      // button debounce
+#include <FS.h>               // File system ?
+#include <SD.h>               // SD card
 
-  
-
-#include <SPI.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SH1106.h>
-#include <ClickButton.h>
-
+#define VERSION "1.0"
 
 #define      LAMBDA_PIN 34
 #define         TPS_PIN 31
@@ -14,14 +14,15 @@
 #define      BUTTON_PIN 13
 #define    OLED_SDA_PIN 21
 #define    OLED_SCL_PIN 22
-Adafruit_SH1106 display(OLED_SDA_PIN, OLED_SCL_PIN);
 
+Adafruit_SH1106 display(OLED_SDA_PIN, OLED_SCL_PIN);
 
 #define SERIALPERFCOUNTERS false
 #define SAMPLINGRATE 20
 #define SCREENREFRESHRATE 20
+#define BOOTSEQUENCETIMEINTERVAL 300
 
-// Counters
+#pragma region Counters
 // // global counters
 unsigned long global_totalMicros, global_valueMicros, global_logicMicros, global_GPUMicros;
 unsigned long UPS;
@@ -32,18 +33,28 @@ bool sampleRateConstrained = false;
 // // screen updates
 unsigned long local_GPUMicros;
 unsigned long screenRefreshTime = 1000000/SCREENREFRESHRATE; // 0 to unrestrict
+#pragma endregion
 
-// Screen logic
+#pragma region Controller logic
 ClickButton button(BUTTON_PIN, LOW, CLICKBTN_PULLUP);
 byte state = 0;
+#pragma endregion
 
-// Values reading & smoothing
+#pragma region Values
+// Lambda reading and smoothing
 const int lambda_numReadings = 15;
 int lambda_readings[lambda_numReadings];      // the readings from the analog input
 int lambda_readIndex = 0;                     // the index of the current reading
 int lambda_total = 0;                         // the running total
 int lambda_average = 0;                       // the average
 
+// RPM reading
+long currentRPM;
+bool lastState;
+unsigned long lastPickUp;
+#pragma endregion
+
+#pragma region AFR Gauge variables
 // AFR Gauge
 #define afrMin 10
 #define afrMax 1100
@@ -68,19 +79,25 @@ void InitGauge(int min, int max) {
     gaugeMax = max;
     gauge_active = false;
 }
+#pragma endregion
 
-// RPM GAUGE =======
-long currentRPM;
-bool lastState;
-unsigned long lastPickUp;
+#pragma region SDCard
+
+File myFile;
+String dataString = "";
+
+#pragma endregion
 
 // =========== LOGIC ===============
 
 void setup()   {                
   Serial.begin(115200);
 
+  // Booting with feedback on screen
   ScreenInit();
-  BootAnimation();
+  SDInit();
+
+  delay(BOOTSEQUENCETIMEINTERVAL * 3);
 
   InitLambdaSmoothing();
   InitRPM();
@@ -88,8 +105,6 @@ void setup()   {
   InitGauge(afrMin, afrMax);
 
   global_totalMicros = micros();
-
-  
 }
 
 
@@ -125,6 +140,7 @@ void UpdateValues(){
     return;
   }
   local_valuesMicros = micros();
+
   lambda_updateValue();
 
   UpdateRPM();
@@ -142,8 +158,89 @@ void UpdateInputs(){
   button.Update();
 }
 
-// ============= SCREENS ===========
+// ============= SD ================
 
+void SDInit(){
+
+  Serial.println("Initializing SD Card");
+    display.println("Initializing SD Card");
+    display.display();
+    delay(BOOTSEQUENCETIMEINTERVAL);
+
+  if(!SD.begin()){
+    Serial.println("Card Mount Failed");
+    display.println("Card Mount Failed");
+    display.display();
+    delay(BOOTSEQUENCETIMEINTERVAL);
+    return;
+  } else {
+    Serial.println("Card Mounted");
+    display.println("Card Mounted");
+    display.display();
+    delay(BOOTSEQUENCETIMEINTERVAL);
+  }
+
+  uint8_t cardType = SD.cardType();
+
+  if(cardType == CARD_NONE){
+    Serial.println("No SD card attached");
+    display.println("No SD card attached");
+    display.display();
+    delay(BOOTSEQUENCETIMEINTERVAL);
+    return;
+  }
+
+  Serial.print("SD Card Type: ");
+  display.print("SD Card Type: ");
+  if(cardType == CARD_MMC){
+    Serial.println("MMC");
+    display.println("MMC");
+  } else if(cardType == CARD_SD){
+    Serial.println("SDSC");
+    display.println("SDSC");
+  } else if(cardType == CARD_SDHC){
+    Serial.println("SDHC");
+    display.println("SDHC");
+  } else {
+    Serial.println("UNKNOWN");
+    display.println("UNKNOWN");
+  }
+
+  display.display();
+  delay(BOOTSEQUENCETIMEINTERVAL);
+
+  uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+  Serial.printf("SD Card Size: %lluMB\n", cardSize); Serial.println();
+  display.printf("SD Card Size: %lluMB\n", cardSize); display.println();
+
+  display.display();
+  delay(BOOTSEQUENCETIMEINTERVAL);
+}
+
+void SDScreen(){
+  display.drawRect(0,0, 128, 57, BLACK);
+  display.setTextColor(WHITE);
+  display.setCursor(0,0);
+  display.setTextSize(2);
+  display.println("LOGGING");
+  display.drawLine(0, 19, 126, 19, WHITE);
+  display.setTextSize(1);
+  display.setCursor(0,24);
+  display.print("SD Status: ");
+  if (SD.cardType() != CARD_NONE)
+    display.println("READY");
+  else
+    display.println("FAILED");
+  display.display();
+}
+
+void AddEntryToSDFile(){
+  dataString = "";
+  // gather data
+  // append to file
+}
+
+// ============= SCREENS ===========
 
 void ScreenUpdate(){
   global_GPUMicros = micros();
@@ -176,12 +273,7 @@ void ScreenUpdate(){
     break;
 
     case 3: // Recording
-    display.clearDisplay();
-    display.setTextColor(INVERSE);
-    display.setCursor(21,20);
-    display.setTextSize(1);
-    display.print("Recording screen");
-    display.display();
+    SDScreen();
     break;
 
     default:
@@ -255,12 +347,11 @@ void InitRPM(){
 
 void DisplayRPM(){
     display.setTextColor(WHITE,BLACK);
-    display.setCursor(6,16);
+    display.setCursor(0,16);
     display.setTextSize(2);
-    display.print("             ");
-    display.setCursor(6,16);
     display.print("RPM: ");
-    display.println(currentRPM);
+    display.print(currentRPM);
+    display.println("     ");
     display.display();
 }
 
@@ -295,7 +386,6 @@ int getLambdaMillivolts(){
   return analogRead(LAMBDA_PIN) * 3300 / 4096;
 }
 
-
 void lambda_updateValue(){
 // subtract the last reading:
   lambda_total = lambda_total - lambda_readings[lambda_readIndex];
@@ -313,7 +403,6 @@ void lambda_updateValue(){
   // calculate the average:
   lambda_average = lambda_total / lambda_numReadings;
 }
-
 
 void InitLambdaSmoothing(){
   // initialize all the readings to 0:
@@ -409,33 +498,6 @@ void GaugeBegin() {
 
 // ===============BOOT SEQUENCE ==============
 
-void BootAnimation(){
-  // Display Text
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  display.setCursor(0,0);
-  display.println("Connecting to SD.");
-  display.display();
-
-  delay(500);
-
-  display.println("SD Ready.");
-  display.display();
-
-  delay(500);
-
-  display.print("Loading gauge");
-  display.display();
-
-  for (int i = 0 ; i < 4 ; i++){
-    delay(100);
-    i == 4 ? display.println('.') : display.print('.');
-    display.display();
-  }
-
-  SwitchScreen(0);
-}
-
 void ScreenInit(){
   // by default, we'll generate the high voltage from the 3.3v line internally! (neat!)
   display.begin(SH1106_SWITCHCAPVCC, 0x3C);  // initialize with the I2C addr 0x3D (for the 128x64)
@@ -443,8 +505,16 @@ void ScreenInit(){
   // init done
 
   display.setRotation(2);
+  display.display();
 
   SplashScreen();
+
+  display.setCursor(0,0);
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.print("Version : "); display.println(VERSION);
+  display.display();
+  delay(BOOTSEQUENCETIMEINTERVAL);
 }
 
 void SplashScreen() {
@@ -452,7 +522,7 @@ void SplashScreen() {
   // Since the buffer is intialized with an Adafruit splashscreen
   // internally, this will display the splashscreen.
   display.display();
-  delay(2000);
+  delay(1750);
 
   // Clear the buffer.
   display.clearDisplay();

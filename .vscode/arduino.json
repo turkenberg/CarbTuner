@@ -1,7 +1,7 @@
 {
     "programmer": "AVRISP mkII",
     "board": "esp32:esp32:nodemcu-32s",
-    "configuration": "FlashFreq=80,UploadSpeed=115200",
+    "configuration": "FlashFreq=80,UploadSpeed=512000",
     "sketch": "ESP32\\MultiToolESP\\MultiToolESP.ino",
     "port": "COM4",
     "output": "../ArduinoOutput"
