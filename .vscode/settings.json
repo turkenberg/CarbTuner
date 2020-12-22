@@ -12,6 +12,17 @@
         "string": "cpp",
         "unordered_map": "cpp",
         "unordered_set": "cpp",
-        "string_view": "cpp"
+        "string_view": "cpp",
+        "fstream": "cpp",
+        "xlocmes": "cpp",
+        "*.tcc": "cpp",
+        "algorithm": "cpp",
+        "sstream": "cpp",
+        "xiosbase": "cpp",
+        "atomic": "cpp",
+        "system_error": "cpp",
+        "xlocale": "cpp",
+        "typeinfo": "cpp",
+        "istream": "cpp"
     }
 }

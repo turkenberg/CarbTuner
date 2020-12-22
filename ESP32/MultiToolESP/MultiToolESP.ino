@@ -3,10 +3,10 @@
 #include <Adafruit_GFX.h>     // GFX
 #include <Adafruit_SH1106.h>  // OLED screen
 #include <ClickButton.h>      // button debounce
-#include <FS.h>               // File system ?
 #include <SD.h>               // SD card
 
 #define VERSION "1.0"
+#define SDFILENAME "/MultitoolRecords.txt"
 
 #define      LAMBDA_PIN 34
 #define         TPS_PIN 31
@@ -19,8 +19,9 @@ Adafruit_SH1106 display(OLED_SDA_PIN, OLED_SCL_PIN);
 
 #define SERIALPERFCOUNTERS false
 #define SAMPLINGRATE 20
+#define LOGGINGRATE 12
 #define SCREENREFRESHRATE 20
-#define BOOTSEQUENCETIMEINTERVAL 300
+#define BOOTSEQUENCETIMEINTERVAL 170
 
 #pragma region Counters
 // // global counters
@@ -33,6 +34,10 @@ bool sampleRateConstrained = false;
 // // screen updates
 unsigned long local_GPUMicros;
 unsigned long screenRefreshTime = 1000000/SCREENREFRESHRATE; // 0 to unrestrict
+// // Data logging
+unsigned long local_dataLogMicros;
+unsigned long dataLoggingTime = 1000000/LOGGINGRATE;
+unsigned long fileSize;
 #pragma endregion
 
 #pragma region Controller logic
@@ -83,8 +88,14 @@ void InitGauge(int min, int max) {
 
 #pragma region SDCard
 
-File myFile;
+SDFile myFile;
 String dataString = "";
+String formattedFileSize = "";
+bool recording = false;
+int recordCounter;
+bool recordValid;
+bool hasTheFileBeenReset = false;
+bool hasTheFileBeenRemoved = false;
 
 #pragma endregion
 
@@ -97,7 +108,7 @@ void setup()   {
   ScreenInit();
   SDInit();
 
-  delay(BOOTSEQUENCETIMEINTERVAL * 3);
+  delay(BOOTSEQUENCETIMEINTERVAL);
 
   InitLambdaSmoothing();
   InitRPM();
@@ -106,7 +117,6 @@ void setup()   {
 
   global_totalMicros = micros();
 }
-
 
 void loop() {
 
@@ -159,6 +169,177 @@ void UpdateInputs(){
 }
 
 // ============= SD ================
+
+void SDScreen(){
+  display.drawRect(0,0, 128, 57, BLACK);
+
+  display.setTextSize(1);
+  display.drawLine(0, 19, 126, 19, WHITE);
+
+  if (recording)
+  {
+    display.fillCircle(114,7,6, WHITE);
+    display.setTextColor(WHITE, BLACK);
+    display.setCursor(0,0);
+    display.setTextSize(2);
+    display.println("LOGGING");
+    display.setTextSize(1);
+  }
+  else
+  {
+    display.fillCircle(114,7,6, BLACK);
+    display.setTextColor(WHITE, BLACK);
+    display.setCursor(0,0);
+    display.setTextSize(2);
+    display.println("LOG    ");
+    display.setTextSize(1);
+  }
+
+  display.setCursor(0,24);
+  display.print("SD:");
+  if (SD.cardType() != CARD_NONE)
+  {
+    display.setCursor(18,24);
+    if(recordValid)
+    {
+      display.print("OK");
+      display.print(" (");
+      if (fileSize/1000 > 100) display.print("_-0");
+      else display.print(fileSize/1000);
+      display.println(" kB)");
+    } else
+    {
+      display.println("ERROR");
+      display.println("PLEASE FORMAT SD");
+      display.display();
+      return;
+    }
+    
+    display.print("SR:"); display.print(LOGGINGRATE); display.println(" Hz");
+
+    display.setTextSize(2);
+    display.setCursor(128-(12*4),24);
+    display.setTextColor(WHITE, BLACK);
+    display.print("    ");
+
+    if (recordCounter >= 1000)
+      display.setCursor(128-(12*4),24);
+    else if (recordCounter >= 100)
+      display.setCursor(128-(12*3),24);
+    else if (recordCounter >= 10)
+      display.setCursor(128-(12*2),24);
+    else
+      display.setCursor(128-12,24);
+    display.print(recordCounter);
+    display.setTextSize(1);
+  }  
+  else
+  {
+    display.println("Not Mounted");
+    display.display();
+    return;
+  }
+
+  display.setCursor(0,44);
+  if (hasTheFileBeenReset)
+    display.print("File reset!");
+  else if (hasTheFileBeenRemoved)
+    display.print("File deleted!");
+  else
+    display.print("             ");
+
+  display.display();
+}
+
+void SDOpenLogFile(bool erase = false){
+  if (myFile != 0) // if already open, close it
+    SDCloseFile();
+  
+  if (erase)
+  {
+    myFile = SD.open(SDFILENAME, FILE_WRITE);
+    fileSize = myFile.size();
+    hasTheFileBeenReset = true;
+    hasTheFileBeenRemoved = false;
+  }
+  else
+  {
+    myFile = SD.open(SDFILENAME, FILE_APPEND);
+    fileSize = myFile.size();
+    hasTheFileBeenReset = false;
+    hasTheFileBeenRemoved = false;
+  }
+}
+
+void SDLogic(){
+
+  if (button.clicks == -1) // long click ; switch record on/off
+  {
+    if (recording) StopRecording();
+    else BeginRecording();
+  }
+
+  if (button.clicks==-2 && !recording)
+  {
+    SDOpenLogFile(true); // re-open but erase first
+  }
+
+  if (button.clicks==-3 && !recording)
+  {
+    SD.remove(SDFILENAME);
+    hasTheFileBeenRemoved = true;;
+  }
+
+  if (recording) SDRecord();
+}
+
+void BeginRecording(){
+  if (recording) return;
+  if (myFile == 0) SDOpenLogFile();
+  recordCounter = 0;
+
+  recording = true;
+  hasTheFileBeenReset = false;
+  hasTheFileBeenRemoved = false;
+
+  local_dataLogMicros = micros();
+}
+
+void StopRecording(){
+  fileSize = myFile.size();
+  SDCloseFile();
+  recording = false;
+  hasTheFileBeenReset = false;
+  hasTheFileBeenRemoved = false;
+}
+
+void SDRecord(){
+  if (myFile == 0) return;
+
+  if ((micros() - local_dataLogMicros) < dataLoggingTime)
+    return;
+  
+  local_dataLogMicros = micros();
+
+  dataString = "";
+  // gather data
+  dataString += millis();
+  dataString += ",";
+  dataString += currentRPM;
+  dataString += ",";
+  dataString += lambda_average;
+
+  if (myFile.println(dataString)){
+    recordCounter++;
+    recordValid = true;
+  }
+}
+
+void SDCloseFile(){
+  if (myFile == 0) return;
+  fileSize = myFile.size();
+  myFile.close();
+}
 
 void SDInit(){
 
@@ -215,29 +396,17 @@ void SDInit(){
 
   display.display();
   delay(BOOTSEQUENCETIMEINTERVAL);
-}
 
-void SDScreen(){
-  display.drawRect(0,0, 128, 57, BLACK);
-  display.setTextColor(WHITE);
-  display.setCursor(0,0);
-  display.setTextSize(2);
-  display.println("LOGGING");
-  display.drawLine(0, 19, 126, 19, WHITE);
-  display.setTextSize(1);
-  display.setCursor(0,24);
-  display.print("SD Status: ");
-  if (SD.cardType() != CARD_NONE)
-    display.println("READY");
-  else
-    display.println("FAILED");
+  SDOpenLogFile(false);
+  fileSize = myFile.size();
+  SDCloseFile();
+  recordValid = true;
+
+  Serial.print("Log file size: " );Serial.print(fileSize/1000);; Serial.println(" kB");
+  display.print("Log file size: " );display.print(fileSize/1000);; display.println(" kB");
+
   display.display();
-}
-
-void AddEntryToSDFile(){
-  dataString = "";
-  // gather data
-  // append to file
+  delay(BOOTSEQUENCETIMEINTERVAL* 2);
 }
 
 // ============= SCREENS ===========
@@ -264,11 +433,11 @@ void ScreenUpdate(){
     break;
 
     case 2: // Calibration screen : show min and max TODO
-    display.clearDisplay();
-    display.setTextColor(INVERSE);
-    display.setCursor(15,20);
-    display.setTextSize(1);
-    display.print("Calibration Screen");
+    display.drawRect(0,0, 128, 57, BLACK);
+    display.setTextSize(2);
+    display.setCursor(0,0);
+    display.print("CALIBRATE");
+    display.drawLine(0, 19, 126, 19, WHITE);
     display.display();
     break;
 
@@ -296,6 +465,8 @@ void ControllerLogic(){
     SwitchScreen();
   }
 
+  SDLogic();
+
   
 // -----------
 if (!SERIALPERFCOUNTERS)
@@ -315,21 +486,32 @@ void SwitchScreen(byte _state){
 }
 
 void drawFPS(){
+    //display.drawLine(0,55,128,55, WHITE); // too much!
     display.setTextColor(WHITE, BLACK);
     display.setCursor(0,57);
     display.setTextSize(1);
     display.print(1040000 / (micros() - local_GPUMicros));
 
+    display.setCursor(24,57);
+    if (recording)
+    {
+      display.print("REC");
+    }
+    else
+    {
+      display.print("   ");
+    }
+    
 
     display.setCursor(128-30,57);
-    display.print("     ");
-    if (UPS > 10000)
+    display.print("      ");
+    if (UPS >= 10000)
       display.setCursor(98,57);  
-    else if (UPS > 1000)
+    else if (UPS >= 1000)
       display.setCursor(104,57);
-    else if (UPS > 100)
+    else if (UPS >= 100)
       display.setCursor(110,57);
-    else if (UPS > 10)
+    else if (UPS >= 10)
       display.setCursor(116,57);
     else
       display.setCursor(122,57);
@@ -346,12 +528,15 @@ void InitRPM(){
 }
 
 void DisplayRPM(){
-    display.setTextColor(WHITE,BLACK);
-    display.setCursor(0,16);
+    display.drawRect(0,0, 128, 57, BLACK);
     display.setTextSize(2);
-    display.print("RPM: ");
+    display.setCursor(0,0);
+    display.print("RPM");
+    display.drawLine(0, 19, 126, 19, WHITE);
+    display.setTextSize(3);
+    display.setCursor(0,26);
     display.print(currentRPM);
-    display.println("     ");
+
     display.display();
 }
 
@@ -372,7 +557,6 @@ void UpdateRPM(){
 }
 
 // ============= AFR GAUGE ===============
-
 
 void AFRGauge(){  
   if (gauge_active == false){ // init if needed
@@ -413,7 +597,7 @@ void InitLambdaSmoothing(){
 
 void drawValue(float value) {
     display.setTextColor(INVERSE);
-    display.setCursor(52,50);
+    display.setCursor(54,46);
     display.setTextSize(1);
     display.println((int)value);
 }
@@ -427,6 +611,7 @@ float angleToXD(float centerX, float radius, float angleD) {
     float angle = (angleD / 360) * (pi2);
     return centerX+radius*cos(angle); // Calculate arc point (X)
 }
+
 float angleToYD(float centerY, float radius, float angleD) {
     float angle = (angleD / 360) * (pi2);
     return centerY+radius*sin(angle); // Calculate arc point (Y)

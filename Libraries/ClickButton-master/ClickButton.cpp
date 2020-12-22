@@ -68,8 +68,8 @@ ClickButton::ClickButton(uint8_t buttonPin)
   depressed      = false;
   _lastBounceTime= 0;
   debounceTime   = 20;            // Debounce timer in ms
-  multiclickTime = 250;           // Time limit for multi clicks
-  longClickTime  = 1000;          // time until long clicks register
+  multiclickTime = 180;           // Time limit for multi clicks
+  longClickTime  = 800;          // time until long clicks register
   changed        = false;
   pinMode(_pin, INPUT);
 }
