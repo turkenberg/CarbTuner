@@ -23,6 +23,10 @@
         "system_error": "cpp",
         "xlocale": "cpp",
         "typeinfo": "cpp",
-        "istream": "cpp"
+        "istream": "cpp",
+        "chrono": "cpp",
+        "limits": "cpp",
+        "random": "cpp",
+        "utility": "cpp"
     }
 }

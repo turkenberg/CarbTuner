@@ -9,7 +9,7 @@
 #define SDFILENAME "/MultitoolRecords.txt"
 
 #define      LAMBDA_PIN 34
-#define         TPS_PIN 31
+#define         TPS_PIN 35
 #define         RPM_PIN 12
 #define      BUTTON_PIN 13
 #define    OLED_SDA_PIN 21
@@ -17,27 +17,30 @@
 
 Adafruit_SH1106 display(OLED_SDA_PIN, OLED_SCL_PIN);
 
-#define SERIALPERFCOUNTERS false
-#define SAMPLINGRATE 20
-#define LOGGINGRATE 12
-#define SCREENREFRESHRATE 20
-#define BOOTSEQUENCETIMEINTERVAL 170
+#define SERIAL_PERF_COUNTERS_ON false
+#define SAMPLING_RATE 20
+#define LOGGING_RATE 12
+#define SCREEN_REFRESH_RATE 20
+#define BOOT_SEQUENCE_TIME_INTERVAL 170
+#define CALIBRATION_INTERVAL 4000000 // in microseconds
 
 #pragma region Counters
 // // global counters
 unsigned long global_totalMicros, global_valueMicros, global_logicMicros, global_GPUMicros;
 unsigned long UPS;
 // // values
-unsigned long samplingTime = 1000000/SAMPLINGRATE;
+unsigned long samplingTime = 1000000/SAMPLING_RATE;
 unsigned long local_valuesMicros;
 bool sampleRateConstrained = false;
 // // screen updates
 unsigned long local_GPUMicros;
-unsigned long screenRefreshTime = 1000000/SCREENREFRESHRATE; // 0 to unrestrict
-// // Data logging
+unsigned long screenRefreshTime = 1000000/SCREEN_REFRESH_RATE; // 0 to unrestrict
+//  Data logging
 unsigned long local_dataLogMicros;
-unsigned long dataLoggingTime = 1000000/LOGGINGRATE;
+unsigned long dataLoggingTime = 1000000/LOGGING_RATE;
 unsigned long fileSize;
+// // Calibration
+unsigned long local_CalibrationMicros;
 #pragma endregion
 
 #pragma region Controller logic
@@ -99,6 +102,23 @@ bool hasTheFileBeenRemoved = false;
 
 #pragma endregion
 
+#pragma region TPS (Software)
+
+const int tps_numReadings = 15;
+int tps_readings[tps_numReadings];      // the readings from the analog input
+int tps_readIndex = 0;                     // the index of the current reading
+int tps_total = 0;                         // the running total
+int tps_average = 0;                       // the average
+
+bool calibrating = false;
+bool hasCalibrated = false;
+
+//float start_position = 0.0f;
+int TPSMaxValue;
+int TPSMinValue;
+
+#pragma endregion
+
 // =========== LOGIC ===============
 
 void setup()   {                
@@ -107,11 +127,13 @@ void setup()   {
   // Booting with feedback on screen
   ScreenInit();
   SDInit();
+  InputsInit();
 
-  delay(BOOTSEQUENCETIMEINTERVAL);
+  delay(BOOT_SEQUENCE_TIME_INTERVAL);
 
   InitLambdaSmoothing();
   InitRPM();
+  TPSInit();
 
   InitGauge(afrMin, afrMax);
 
@@ -129,14 +151,14 @@ void loop() {
 // -------------
   UPS = micros() - global_totalMicros;
   UPS = 1000000 / UPS;
-  if (SERIALPERFCOUNTERS){
+  if (SERIAL_PERF_COUNTERS_ON){
     Serial.print("TOTAL : "); Serial.print(micros() - global_totalMicros); 
     Serial.print("("); Serial.print(UPS);Serial.println(")");
   }
   global_totalMicros = micros();    
 }
 
-// ============= VALUES ===========
+// ============= VALUES ============
 
 void UpdateValues(){
   global_valueMicros = micros();
@@ -144,7 +166,7 @@ void UpdateValues(){
 
   if (sampleRateConstrained && (micros()-local_valuesMicros < samplingTime))
   {
-    if (!SERIALPERFCOUNTERS)
+    if (!SERIAL_PERF_COUNTERS_ON)
       return;
     Serial.print("sampling: ");Serial.print(micros() - global_valueMicros); Serial.print(" / ");
     return;
@@ -154,10 +176,12 @@ void UpdateValues(){
   lambda_updateValue();
 
   UpdateRPM();
+
+  UpdateTPS();
     
 
 // -----------
-if (!SERIALPERFCOUNTERS)
+if (!SERIAL_PERF_COUNTERS_ON)
   return;
 Serial.print("sampling: ");Serial.print(micros() - global_valueMicros); Serial.print(" / ");
 }
@@ -168,7 +192,98 @@ void UpdateInputs(){
   button.Update();
 }
 
+void InputsInit(){
+  button.debounceTime = 20;
+  button.multiclickTime = 250;
+}
+
+// =============== TPS =============
+
+void TPSLogic(){
+  if (button.clicks == -2) // long click ; switch record on/off
+  {
+    calibrating = !calibrating;
+    local_CalibrationMicros = micros();
+    TPSMinValue = tps_average;
+    TPSMaxValue = tps_average;
+  }
+
+  if (calibrating){
+    TPSCalibrate(tps_average);
+  }
+  
+}
+
+void UpdateTPS(){
+
+  // subtract the last reading:
+  tps_total = tps_total - tps_readings[tps_readIndex];
+  // read from the sensor:
+  tps_readings[tps_readIndex] = getTPSPosition();
+  // add the reading to the total:
+  tps_total = tps_total + tps_readings[tps_readIndex];
+  // advance to the next position in the array:
+  tps_readIndex = tps_readIndex + 1;
+  // if we're at the end of the array...
+  if (tps_readIndex >= tps_numReadings) {
+    // ...wrap around to the beginning:
+    tps_readIndex = 0;
+  }
+  // calculate the average:
+  tps_average = tps_total / tps_numReadings;
+}
+
+int getTPSPosition(){
+  return analogRead(TPS_PIN);
+}
+
+void TPSCalibrate(int value){
+  if (!calibrating) return;
+
+  if (micros() > local_CalibrationMicros + 4000000){
+    calibrating = false;
+    hasCalibrated = true;
+    return;
+  }
+
+  TPSMaxValue = max(TPSMaxValue, value);
+  TPSMinValue = min(TPSMinValue, value);
+}
+
+void TPSScreen(){
+    display.drawRect(0,0, 128, 57, BLACK);
+    display.setTextSize(2);
+    display.setCursor(0,0);
+    if (calibrating)
+      display.print("CALIBRATING");
+    else
+      display.print("TPS        ");
+    display.setTextSize(1);
+    display.drawLine(0, 19, 126, 19, WHITE);
+
+    display.setCursor(0,24);
+    display.print("MIN : ");
+    display.println(TPSMinValue);
+    display.print("VAL : ");
+    display.println(tps_average);
+    display.print("MAX : ");
+    display.println(TPSMaxValue);
+
+    display.display();
+}
+
+void TPSInit(){
+  
+  calibrating = false;
+  hasCalibrated = false;
+
+  TPSMaxValue = 700;
+  TPSMinValue = 0;
+}
+
 // ============= SD ================
+
+// add "not calibrated" to screen
 
 void SDScreen(){
   display.drawRect(0,0, 128, 57, BLACK);
@@ -204,7 +319,7 @@ void SDScreen(){
     {
       display.print("OK");
       display.print(" (");
-      if (fileSize/1000 > 100) display.print("_-0");
+      if (fileSize/1000 > 100) display.print("-");
       else display.print(fileSize/1000);
       display.println(" kB)");
     } else
@@ -215,7 +330,7 @@ void SDScreen(){
       return;
     }
     
-    display.print("SR:"); display.print(LOGGINGRATE); display.println(" Hz");
+    display.print("SR:"); display.print(LOGGING_RATE); display.println(" Hz");
 
     display.setTextSize(2);
     display.setCursor(128-(12*4),24);
@@ -275,19 +390,14 @@ void SDLogic(){
 
   if (button.clicks == -1) // long click ; switch record on/off
   {
-    if (recording) StopRecording();
-    else BeginRecording();
-  }
-
-  if (button.clicks==-2 && !recording)
-  {
-    SDOpenLogFile(true); // re-open but erase first
-  }
+    if (recording)  StopRecording();
+    else            BeginRecording();
+}
 
   if (button.clicks==-3 && !recording)
   {
     SD.remove(SDFILENAME);
-    hasTheFileBeenRemoved = true;;
+    hasTheFileBeenRemoved = true;
   }
 
   if (recording) SDRecord();
@@ -346,19 +456,19 @@ void SDInit(){
   Serial.println("Initializing SD Card");
     display.println("Initializing SD Card");
     display.display();
-    delay(BOOTSEQUENCETIMEINTERVAL);
+    delay(BOOT_SEQUENCE_TIME_INTERVAL);
 
   if(!SD.begin()){
     Serial.println("Card Mount Failed");
     display.println("Card Mount Failed");
     display.display();
-    delay(BOOTSEQUENCETIMEINTERVAL);
+    delay(BOOT_SEQUENCE_TIME_INTERVAL);
     return;
   } else {
     Serial.println("Card Mounted");
     display.println("Card Mounted");
     display.display();
-    delay(BOOTSEQUENCETIMEINTERVAL);
+    delay(BOOT_SEQUENCE_TIME_INTERVAL);
   }
 
   uint8_t cardType = SD.cardType();
@@ -367,7 +477,7 @@ void SDInit(){
     Serial.println("No SD card attached");
     display.println("No SD card attached");
     display.display();
-    delay(BOOTSEQUENCETIMEINTERVAL);
+    delay(BOOT_SEQUENCE_TIME_INTERVAL);
     return;
   }
 
@@ -388,14 +498,14 @@ void SDInit(){
   }
 
   display.display();
-  delay(BOOTSEQUENCETIMEINTERVAL);
+  delay(BOOT_SEQUENCE_TIME_INTERVAL);
 
   uint64_t cardSize = SD.cardSize() / (1024 * 1024);
   Serial.printf("SD Card Size: %lluMB\n", cardSize); Serial.println();
   display.printf("SD Card Size: %lluMB\n", cardSize); display.println();
 
   display.display();
-  delay(BOOTSEQUENCETIMEINTERVAL);
+  delay(BOOT_SEQUENCE_TIME_INTERVAL);
 
   SDOpenLogFile(false);
   fileSize = myFile.size();
@@ -406,7 +516,7 @@ void SDInit(){
   display.print("Log file size: " );display.print(fileSize/1000);; display.println(" kB");
 
   display.display();
-  delay(BOOTSEQUENCETIMEINTERVAL* 2);
+  delay(BOOT_SEQUENCE_TIME_INTERVAL* 2);
 }
 
 // ============= SCREENS ===========
@@ -428,20 +538,15 @@ void ScreenUpdate(){
     AFRGauge();
     break;
 
-    case 1: // RPM gauge direct display TODO
+    case 1: // RPM
     DisplayRPM();
     break;
 
-    case 2: // Calibration screen : show min and max TODO
-    display.drawRect(0,0, 128, 57, BLACK);
-    display.setTextSize(2);
-    display.setCursor(0,0);
-    display.print("CALIBRATE");
-    display.drawLine(0, 19, 126, 19, WHITE);
-    display.display();
+    case 2: // TPS
+    TPSScreen();
     break;
 
-    case 3: // Recording
+    case 3: // LOGGING
     SDScreen();
     break;
 
@@ -450,7 +555,7 @@ void ScreenUpdate(){
   }
   
 // -----------
-if (!SERIALPERFCOUNTERS)
+if (!SERIAL_PERF_COUNTERS_ON)
   return;
 Serial.print("GPU: ");Serial.print(micros() - global_logicMicros); Serial.print(" / ");
 }
@@ -467,9 +572,11 @@ void ControllerLogic(){
 
   SDLogic();
 
+  TPSLogic();
+
   
 // -----------
-if (!SERIALPERFCOUNTERS)
+if (!SERIAL_PERF_COUNTERS_ON)
   return;
 Serial.print("logic: ");Serial.print(micros() - global_logicMicros); Serial.print(" / ");
 }
@@ -496,6 +603,16 @@ void drawFPS(){
     if (recording)
     {
       display.print("REC");
+    }
+    else
+    {
+      display.print("   ");
+    }
+
+    display.setCursor(72,57);
+    if (calibrating)
+    {
+      display.print("CAL");
     }
     else
     {
@@ -699,7 +816,7 @@ void ScreenInit(){
   display.setTextColor(WHITE);
   display.print("Version : "); display.println(VERSION);
   display.display();
-  delay(BOOTSEQUENCETIMEINTERVAL);
+  delay(BOOT_SEQUENCE_TIME_INTERVAL);
 }
 
 void SplashScreen() {
